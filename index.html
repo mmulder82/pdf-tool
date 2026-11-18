@@ -1,0 +1,141 @@
+﻿<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<!--
+  Beveiliging: alles komt van deze eigen website; geen externe servers.
+  'wasm-unsafe-eval' is nodig voor de WebAssembly-decoders van pdf.js (afgeschermd, geen toegang tot de pagina).
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF samenvoegen</title>
+<meta name="description" content="Voeg PDF-bestanden samen in je browser, zoals in Voorvertoning op de Mac. Er wordt niets geüpload.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='10' y='2' width='18' height='23' rx='3' fill='%2390b4ec'/%3E%3Crect x='4' y='7' width='18' height='23' rx='3' fill='%230a64d6'/%3E%3Cpath d='M13 13.5v10M8 18.5h10' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="toolbar">
+  <div class="brand">
+    <svg class="brand-icon" viewBox="0 0 32 32" aria-hidden="true"><rect x="10" y="2" width="18" height="23" rx="3" fill="#90b4ec"/><rect x="4" y="7" width="18" height="23" rx="3" fill="#0a64d6"/><path d="M13 13.5v10M8 18.5h10" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
+    <div class="brand-text">
+      <span class="app-name no-doc">PDF samenvoegen</span>
+      <div class="title-row doc-only">
+        <label for="fileName" class="sr-only">Bestandsnaam</label>
+        <input id="fileName" class="title-input" type="text" spellcheck="false" autocomplete="off" value="">
+        <span class="title-ext">.pdf</span>
+      </div>
+      <span class="doc-info doc-only" id="docInfo"></span>
+    </div>
+  </div>
+
+  <div class="actions doc-only">
+    <button class="tb-btn" id="btnAdd" type="button" title="PDF achteraan toevoegen (Ctrl/⌘+O)">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M12 11v6M9 14h6"/></svg>
+      <span class="lbl">Toevoegen</span>
+    </button>
+    <span class="tb-sep" aria-hidden="true"></span>
+    <button class="tb-btn icon-only" id="btnRotL" type="button" title="Draai naar links" aria-label="Draai geselecteerde pagina's naar links">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1L3.5 8.5"/><path d="M3.5 3.5v5h5"/></svg>
+    </button>
+    <button class="tb-btn icon-only" id="btnRotR" type="button" title="Draai naar rechts" aria-label="Draai geselecteerde pagina's naar rechts">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1l2.6 2.6"/><path d="M20.5 3.5v5h-5"/></svg>
+    </button>
+    <button class="tb-btn" id="btnDelete" type="button" title="Verwijder geselecteerde pagina's (Delete)">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13M10 11v5.5M14 11v5.5"/></svg>
+      <span class="lbl">Verwijder</span>
+    </button>
+    <span class="tb-sep" aria-hidden="true"></span>
+    <button class="tb-btn icon-only" id="btnUndo" type="button" title="Herstel (Ctrl/⌘+Z)" aria-label="Herstel">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+    </button>
+    <button class="tb-btn icon-only" id="btnRedo" type="button" title="Opnieuw (Ctrl/⌘+Shift+Z)" aria-label="Opnieuw">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
+    </button>
+    <span class="tb-sep" aria-hidden="true"></span>
+    <button class="tb-btn" id="btnClose" type="button" title="Sluit dit document en begin opnieuw">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      <span class="lbl">Sluiten</span>
+    </button>
+    <button class="tb-btn" id="btnSaveAs" type="button" title="Bewaar als een nieuw bestand (Ctrl/⌘+Shift+S)" hidden>
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="13" height="13" rx="2"/><path d="M8 8V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3"/></svg>
+      <span class="lbl">Bewaar als…</span>
+    </button>
+    <button class="tb-btn primary" id="btnSave" type="button" title="Bewaar het samengevoegde PDF-bestand (Ctrl/⌘+S)">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5M5 20.5h14"/></svg>
+      <span class="lbl">Bewaar</span>
+    </button>
+  </div>
+</header>
+
+<main>
+  <section class="empty" id="framed" hidden>
+    <div class="dropzone framed-card">
+      <h1>Open deze tool in een eigen venster</h1>
+      <p>Om je bestanden te beschermen werkt PDF samenvoegen niet binnen een andere website.</p>
+      <a class="btn-big" id="framedLink" href="./" target="_blank" rel="noopener noreferrer">Open in nieuw venster</a>
+    </div>
+  </section>
+
+  <section class="empty no-doc" id="empty">
+    <div class="dropzone" id="dropzone">
+      <svg class="hero" viewBox="0 0 96 84" aria-hidden="true">
+        <rect x="38" y="4" width="46" height="60" rx="5" fill="#90b4ec" opacity=".55"/>
+        <rect x="24" y="12" width="46" height="60" rx="5" fill="#90b4ec"/>
+        <rect x="10" y="20" width="46" height="60" rx="5" fill="#0a64d6"/>
+        <path d="M33 38v24M21 50h24" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+      </svg>
+      <h1>Sleep een PDF hierheen</h1>
+      <p>Het eerste bestand is de bron. PDF's die je daarna toevoegt, komen er achteraan bij.</p>
+      <button class="btn-big" id="btnPick" type="button">
+        <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        Kies een PDF…
+      </button>
+      <ol class="steps">
+        <li><span>Open of sleep de <strong>bron-PDF</strong> in dit venster.</span></li>
+        <li><span>Sleep extra PDF's in de zijbalk. Hun pagina's komen <strong>achteraan</strong>.</span></li>
+        <li><span>Versleep, draai of verwijder pagina's en klik op <strong>Bewaar</strong>. In Edge en Chrome werk je zo het originele bestand bij.</span></li>
+      </ol>
+      <div class="privacy">
+        <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+        Alles gebeurt in je eigen browser. Er wordt niets geüpload.
+      </div>
+      <div class="load-error" id="loadError" hidden></div>
+    </div>
+  </section>
+
+  <section class="workspace doc-only" id="workspace">
+    <aside class="sidebar" id="sidebar" aria-label="Pagina's">
+      <div class="thumbs" id="thumbs" role="listbox" aria-multiselectable="true" aria-label="Paginaminiaturen" tabindex="0"></div>
+      <button type="button" class="append-zone" id="appendZone">
+        <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        <span><strong>Sleep PDF's hierheen</strong><br>de pagina's komen achteraan</span>
+      </button>
+      <div class="legend" id="legend">
+        <h2>Bestanden</h2>
+        <ul id="legendList"></ul>
+      </div>
+    </aside>
+    <div class="viewer-wrap">
+      <div class="viewer" id="viewer">
+        <div class="pages" id="pages"></div>
+      </div>
+      <div class="page-indicator" id="pageIndicator" aria-hidden="true"></div>
+    </div>
+  </section>
+</main>
+
+<div class="drop-overlay" id="dropOverlay" aria-hidden="true">
+  <div class="drop-card"><strong id="dropTitle">Laat los om te openen</strong><span id="dropSub"></span></div>
+</div>
+<div class="busy" id="busy" role="status" aria-live="polite">
+  <div class="busy-card"><div class="spinner" aria-hidden="true"></div><span id="busyText">Bezig…</span></div>
+</div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<input type="file" id="fileInput" accept="application/pdf,.pdf" multiple hidden>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

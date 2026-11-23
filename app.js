@@ -31,6 +31,8 @@
     pinRow: $('pinRow'), pinFields: $('pinFields'), sigUsePin: $('sigUsePin'), sigPin: $('sigPin'), sigPin2: $('sigPin2'),
     pinDialog: $('pinDialog'), pinInput: $('pinInput'), pinError: $('pinError'), btnPinOk: $('btnPinOk'), btnPinCancel: $('btnPinCancel'),
     btnLockSigs: $('btnLockSigs'), btnReturn: $('btnReturn'),
+    returnDialog: $('returnDialog'), returnName: $('returnName'), returnHint: $('returnHint'), returnSuffixes: $('returnSuffixes'),
+    btnReturnOk: $('btnReturnOk'), btnReturnCancel: $('btnReturnCancel'), returnBase: $('returnBase'),
   };
 
   // Beveiliging: niet werken binnen een frame van een andere website (tegen clickjacking).
@@ -76,7 +78,7 @@
   };
   let nextFileId = 1, nextEntryId = 1, nextAnnoId = 1;
   // Koppeling met een andere tool op dit websiteadres (zie onderaan).
-  const link = { active: false, wacht: 0, origin: location.origin, sessie: null, label: '', busy: false };
+  const link = { active: false, wacht: 0, origin: location.origin, sessie: null, label: '', busy: false, bron: '' };
   const byEl = new WeakMap();
   const byId = new Map();
 
@@ -2182,7 +2184,7 @@
     const inField = ev.target instanceof HTMLElement && (ev.target.matches('input, textarea, select') || ev.target.isContentEditable);
     const hasDoc = state.entries.length > 0;
 
-    if (els.sigDialog.open || els.pinDialog.open) return;   // de dialogen regelen hun eigen toetsen
+    if (els.sigDialog.open || els.pinDialog.open || els.returnDialog.open) return;   // de dialogen regelen hun eigen toetsen
     if (key === 'Escape' && !els.sigMenu.hidden) { closeSigMenu(); els.btnSign.focus(); return; }
     if (mod && !ev.altKey && key.toLowerCase() === 'o') { ev.preventDefault(); openPicker(); return; }
     if (!hasDoc) return;
@@ -2259,10 +2261,56 @@
 
   function updateLinkUi() {
     els.btnReturn.hidden = !link.active;
+    els.body.classList.toggle('linked', link.active);
     els.btnSave.classList.toggle('primary', !link.active);
     els.btnReturn.disabled = !link.active || state.entries.length === 0 || link.busy;
     els.btnReturn.title = link.active ? `Zet het resultaat terug bij ${link.label} (als nieuwe bijlage)` : '';
   }
+
+  // Naam voor het nieuwe bestand: de bron plus wat er is gebeurd, bijvoorbeeld "Contract - ondertekend".
+    function suggestedSuffix() {
+    if (state.entries.some((e) => e.annos.some((it) => it.type === 'sig'))) return 'ondertekend';
+    if ([...state.files.values()].some((f) => f.formValues.size) || state.entries.some((e) => e.annos.length)) return 'ingevuld';
+    if (new Set(state.entries.map((e) => e.fileId)).size > 1) return 'samengevoegd';
+    return 'bewerkt';
+  }
+  // De originele naam blijft altijd staan; je kiest alleen wat erachter komt.
+  const returnBase = () => link.bron || 'Document';
+  const cleanSuffix = (v) => sanitizeName(v).replace(/^[\s-]+/, '');
+  function markSuffixChips() {
+    const v = cleanSuffix(els.returnName.value).toLowerCase();
+    for (const b of els.returnSuffixes.querySelectorAll('.chip')) b.setAttribute('aria-pressed', String(v === b.dataset.suffix));
+  }
+  function openReturnDialog() {
+    if (!link.active || link.busy || !state.entries.length) return;
+    if (!linkOpener()) { toast('Het venster waaruit je deze PDF opende is gesloten. Bewaar het resultaat met Bewaar.', 'error'); return; }
+    finishEditing();
+    els.returnBase.textContent = returnBase();
+    els.returnBase.title = returnBase() + '.pdf';
+    els.returnName.value = suggestedSuffix();
+    els.returnHint.textContent = `Het resultaat komt als nieuwe bijlage bij ${link.label}. Het origineel blijft bewaard.`;
+    markSuffixChips();
+    els.returnDialog.showModal();
+    els.returnName.focus();
+    els.returnName.select();
+  }
+  els.returnSuffixes.addEventListener('click', (ev) => {
+    const b = ev.target.closest('.chip');
+    if (!b) return;
+    els.returnName.value = b.dataset.suffix;
+    markSuffixChips();
+    els.returnName.focus();
+  });
+  els.returnName.addEventListener('input', markSuffixChips);
+  els.returnName.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); els.btnReturnOk.click(); } });
+  els.btnReturnCancel.addEventListener('click', () => els.returnDialog.close());
+  els.btnReturnOk.addEventListener('click', () => {
+    const suffix = cleanSuffix(els.returnName.value);
+    if (!suffix) { els.returnName.focus(); return; }
+    els.returnDialog.close();
+    els.fileName.value = sanitizeName(`${returnBase()} - ${suffix}`);
+    returnResult();
+  });
 
   async function returnResult() {
     if (!link.active || link.busy || !state.entries.length) return;
@@ -2310,6 +2358,7 @@
       link.sessie = d.sessie;
       link.label = typeof d.label === 'string' && d.label.trim() ? `“${d.label.trim().slice(0, 120)}”` : 'de tool waaruit je dit opende';
       updateLinkUi();
+      link.bron = files.length ? (sanitizeName(files[0].name) || '') : '';
       if (files.length) addFiles(files);
       toast(`Geopend vanuit ${link.label}. Klaar? Klik op Terugzetten.`);
     } else if (d.type === 'im:ontvangen' && link.active && d.sessie === link.sessie) {
@@ -2326,7 +2375,7 @@
     }
   }
 
-  els.btnReturn.addEventListener('click', returnResult);
+  els.btnReturn.addEventListener('click', openReturnDialog);
   if (location.hash === '#koppeling' && linkOpener()) {
     window.addEventListener('message', onLinkMessage);
     // Laat alleen een venster op precies dit websiteadres weten dat de tool klaar is.

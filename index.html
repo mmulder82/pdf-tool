@@ -213,6 +213,22 @@
     <button type="button" class="tb-btn primary" id="btnPinOk">Ontgrendel</button>
   </div>
 </dialog>
+<dialog class="dialog dialog-small" id="returnDialog" aria-labelledby="returnTitle">
+  <h2 id="returnTitle">Terugzetten als nieuwe bijlage</h2>
+  <p class="hint" id="returnHint">Het origineel blijft bewaard.</p>
+  <label for="returnName" class="field-label">Toevoeging aan de naam</label>
+  <div class="return-name"><span class="return-base" id="returnBase"></span><span class="return-sep" aria-hidden="true">-</span><input id="returnName" class="text-input" type="text" spellcheck="false" autocomplete="off" maxlength="60"><span class="title-ext">.pdf</span></div>
+  <div class="suffix-row" id="returnSuffixes" aria-label="Snel kiezen">
+    <button type="button" class="chip" data-suffix="ondertekend">ondertekend</button>
+    <button type="button" class="chip" data-suffix="ingevuld">ingevuld</button>
+    <button type="button" class="chip" data-suffix="samengevoegd">samengevoegd</button>
+    <button type="button" class="chip" data-suffix="bewerkt">bewerkt</button>
+  </div>
+  <div class="dialog-actions">
+    <button type="button" class="tb-btn" id="btnReturnCancel">Annuleren</button>
+    <button type="button" class="tb-btn primary" id="btnReturnOk">Terugzetten</button>
+  </div>
+</dialog>
 <input type="file" id="fileInput" accept="application/pdf,.pdf" multiple hidden>
 
 <script type="module" src="app.js"></script>

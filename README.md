@@ -69,7 +69,8 @@ In **Edge en Chrome** onthoudt de tool welk bestand de bron is. **Bewaar** schri
 De [Informatiemanagement-tool](https://mmulder82.github.io/informatiemanagement-tool/) kan een PDF-bijlage direct in deze tool openen.
 
 - Achter een PDF-bijlage van een activiteit klik je op **PDF-tool**. Heeft de activiteit meerdere PDF's, dan kun je ook **PDF's samenvoegen** kiezen. Deze tool opent dan in een nieuw tabblad, met de PDF('s) al geladen.
-- Klaar met ondertekenen, invullen of samenvoegen? Klik op **Terugzetten**. Het resultaat komt als nieuwe bijlage bij de activiteit. Het origineel blijft ongewijzigd.
+- Klaar met ondertekenen, invullen of samenvoegen? Klik op **Terugzetten**. De originele naam blijft staan; je kiest alleen een toevoeging, bijvoorbeeld *Contract - ondertekend*. De tool stelt zelf een toevoeging voor op basis van wat je hebt gedaan. Met de knoppen *ondertekend*, *ingevuld*, *samengevoegd* en *bewerkt* kies je met één klik een andere, of je typt zelf iets.
+- Het resultaat komt als nieuwe bijlage bij de activiteit. Het origineel blijft ongewijzigd.
 - **Bewaar** en **Bewaar als…** werken gewoon, als je het resultaat (ook) zelf ergens wilt bewaren.
 - De koppeling werkt alleen tussen tools op **hetzelfde websiteadres**, bijvoorbeeld `https://<gebruikersnaam>.github.io/pdf-tool/` en `https://<gebruikersnaam>.github.io/informatiemanagement-tool/`. Berichten van andere websites of van andere vensters dan het venster dat deze tool opende, worden genegeerd. Zo kan geen andere website je een PDF laten ondertekenen en het resultaat ophalen.
 - De bestanden gaan rechtstreeks van het ene tabblad naar het andere, in je eigen browser. Er wordt niets geüpload.

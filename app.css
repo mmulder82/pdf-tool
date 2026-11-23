@@ -273,6 +273,14 @@ select.field-ctl{padding:0}
 .dialog-error{color:var(--danger);font-weight:600;margin:10px 0 0}
 .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 .dialog-small{width:min(400px,calc(100vw - 32px))}
+.return-name{display:flex;align-items:center;gap:6px;min-width:0}
+.return-name .text-input{flex:1;min-width:110px}
+.return-base{font-weight:600;min-width:0;max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.return-sep,.return-name .title-ext{color:var(--muted);flex:none}
+.suffix-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.chip{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:999px;padding:3px 10px;font:inherit;font-size:12.5px;cursor:pointer}
+.chip:hover{color:var(--accent);border-color:var(--accent)}
+.chip[aria-pressed="true"]{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
 .pin-row .check{margin-top:8px}
 .pin-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
 .pin-fields .hint{grid-column:1 / -1;margin:0}
@@ -314,6 +322,11 @@ select.field-ctl{padding:0}
 .toast.error button{color:#fff;text-decoration:underline}
 @keyframes pop{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
+/* Gekoppeld (met Terugzetten) is de werkbalk breder: labels eerder verbergen. */
+@media (max-width: 1240px){
+  body.linked .tb-btn:not(.primary) .lbl{display:none}
+  body.linked .tb-btn:not(.primary){padding:0 7px}
+}
 @media (max-width: 980px){
   .tb-btn:not(.primary) .lbl{display:none}
   .tb-btn:not(.primary){padding:0 7px}

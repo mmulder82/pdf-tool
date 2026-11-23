@@ -22,6 +22,15 @@
     viewer: $('viewer'), pages: $('pages'), pageIndicator: $('pageIndicator'),
     dropOverlay: $('dropOverlay'), dropTitle: $('dropTitle'), dropSub: $('dropSub'),
     busy: $('busy'), busyText: $('busyText'), toasts: $('toasts'),
+    btnText: $('btnText'), btnSign: $('btnSign'), sigMenu: $('sigMenu'), sigList: $('sigList'),
+    btnNewSig: $('btnNewSig'), btnAddDate: $('btnAddDate'),
+    sigDialog: $('sigDialog'), sigPad: $('sigPad'), btnClearPad: $('btnClearPad'),
+    sigTypeInput: $('sigTypeInput'), sigTypePreview: $('sigTypePreview'),
+    sigImageInput: $('sigImageInput'), sigImagePreview: $('sigImagePreview'),
+    sigRemember: $('sigRemember'), sigError: $('sigError'), btnSigCancel: $('btnSigCancel'), btnSigUse: $('btnSigUse'),
+    pinRow: $('pinRow'), pinFields: $('pinFields'), sigUsePin: $('sigUsePin'), sigPin: $('sigPin'), sigPin2: $('sigPin2'),
+    pinDialog: $('pinDialog'), pinInput: $('pinInput'), pinError: $('pinError'), btnPinOk: $('btnPinOk'), btnPinCancel: $('btnPinCancel'),
+    btnLockSigs: $('btnLockSigs'),
   };
 
   // Beveiliging: niet werken binnen een frame van een andere website (tegen clickjacking).
@@ -63,8 +72,9 @@
     undo: [], redo: [],
     dirty: false,
     saving: false,
+    activeAnno: null,     // { e, it }: geselecteerde handtekening of tekstvak
   };
-  let nextFileId = 1, nextEntryId = 1;
+  let nextFileId = 1, nextEntryId = 1, nextAnnoId = 1;
   const byEl = new WeakMap();
   const byId = new Map();
 
@@ -97,6 +107,8 @@
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
   const pagesWord = (n) => plural(n, 'pagina', "pagina's");
   const indexOf = (e) => state.entries.indexOf(e);
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+  const markDirty = () => { state.dirty = true; updateToolbar(); };
 
   function sanitizeName(s) {
     return String(s || '').replace(/\.pdf$/i, '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 180);
@@ -159,6 +171,10 @@
       if (Math.abs(own.width - e.w) > 1 || Math.abs(own.height - e.h) > 1) {
         e.w = own.width; e.h = own.height; layoutEntry(e);
       }
+      if (kind === 'view' && file.hasForm && !e.formLoaded) {
+        e.formLoaded = true;
+        loadFormFields(e, page);
+      }
       const totalRot = (page.rotate + rot) % 360;
       const unit = page.getViewport({ scale: 1, rotation: totalRot });
       const cssW = holder.clientWidth || (kind === 'thumb' ? THUMB_W : 800);
@@ -169,7 +185,10 @@
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.round(vp.width));
       canvas.height = Math.max(1, Math.round(vp.height));
-      await page.render({ canvas, viewport: vp }).promise;
+      // Grote weergave van formulieren: velden niet in het plaatje, ze worden er als invulvelden overheen gelegd.
+      const annotationMode = kind === 'view' && file.hasForm
+        ? pdfjsLib.AnnotationMode.ENABLE_FORMS : pdfjsLib.AnnotationMode.ENABLE;
+      await page.render({ canvas, viewport: vp, annotationMode }).promise;
       if (e.alive && rot === e.rotation && e.visible[kind]) {
         const old = holder.querySelector('canvas');
         if (old) { old.width = 0; old.height = 0; old.remove(); }
@@ -262,6 +281,13 @@
     v.className = 'page';
 
     e.thumbEl = t; e.thumbFrame = frame; e.numEl = num; e.viewEl = v;
+    // Lagen voor formuliervelden en voor handtekeningen/tekstvakken (boven het paginaplaatje).
+    e.annos = []; e.annoEls = new Map(); e.formFields = null; e.fieldEls = []; e.formLoaded = false;
+    e.formLayer = makeLayer('form-layer');
+    e.annoLayer = makeLayer('anno-layer');
+    e.thumbAnnoLayer = makeLayer('anno-layer');
+    v.append(e.formLayer, e.annoLayer);
+    frame.append(e.thumbAnnoLayer);
     byEl.set(t, e); byEl.set(v, e); byId.set(e.id, e);
     layoutEntry(e);
     thumbObs.observe(t);
@@ -277,9 +303,1020 @@
     e.thumbFrame.style.height = Math.round(h * s) + 'px';
     e.viewEl.style.width = `min(100%, ${Math.round(w * VIEW_SCALE)}px)`;
     e.viewEl.style.aspectRatio = `${w} / ${h}`;
+    // px per PDF-punt: paginabreedte (100cqw) gedeeld door de breedte in punten.
+    const pt = `calc(100cqw / ${Math.round(w * 1000) / 1000})`;
+    for (const layer of [e.formLayer, e.annoLayer, e.thumbAnnoLayer]) layer.style.setProperty('--pt', pt);
+    repositionAnnos(e);
+    positionFields(e);
   }
 
-  /* ---------------- Bestanden laden ---------------- */
+  /* ================= Ondertekenen, tekstvakken en formulieren ================= */
+  // Elke pagina heeft een "basisruimte": de pagina zoals pdf.js hem zonder extra draaiing toont, in PDF-punten,
+  // met (0,0) linksboven. Handtekeningen, tekstvakken en formuliervelden worden daarin bewaard, zodat ze
+  // netjes meedraaien als je de pagina draait. `rot` is de draaiing van de inhoud zelf in die basisruimte.
+  const INK_BLACK = '#000000', INK_BLUE = '#1a3fa6';
+  const TEXT_LINE = 1.2, TEXT_BASELINE = 0.94;   // regelhoogte en basislijn (in em), gelijk aan de CSS
+
+  const viewDims = (e) => (e.rotation % 180 ? [e.h, e.w] : [e.w, e.h]);
+  const contentDims = (it) => (it.rot % 180 ? [it.h, it.w] : [it.w, it.h]);
+  const ptPx = (e) => (e.viewEl.clientWidth || 1) / viewDims(e)[0];
+  const ptExpr = (n) => `calc(var(--pt) * ${Math.round(n * 100) / 100})`;
+
+  function makeLayer(cls) {
+    const d = document.createElement('div');
+    d.className = 'layer ' + cls;
+    return d;
+  }
+  // basisruimte -> huidige (gedraaide) weergave, en terug
+  function b2v(e, x, y) {
+    switch (e.rotation) {
+      case 90: return [e.h - y, x];
+      case 180: return [e.w - x, e.h - y];
+      case 270: return [y, e.w - x];
+      default: return [x, y];
+    }
+  }
+  function v2b(e, x, y) {
+    switch (e.rotation) {
+      case 90: return [y, e.h - x];
+      case 180: return [e.w - x, e.h - y];
+      case 270: return [e.w - y, x];
+      default: return [x, y];
+    }
+  }
+  function mapRect(fn, e, r) {
+    const [x1, y1] = fn(e, r.x, r.y), [x2, y2] = fn(e, r.x + r.w, r.y + r.h);
+    return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+  }
+
+  // Zet een vak (basisruimte) op de juiste plek in de weergave; de inhoud draait mee.
+  function placeBox(e, boxEl, rect, rot, inner, sizeInner) {
+    const r = mapRect(b2v, e, rect);
+    boxEl.style.left = ptExpr(r.x);
+    boxEl.style.top = ptExpr(r.y);
+    boxEl.style.width = ptExpr(r.w);
+    boxEl.style.height = ptExpr(r.h);
+    if (!inner) return;
+    inner.style.transform = `translate(-50%, -50%) rotate(${(rot + e.rotation) % 360}deg)`;
+    if (sizeInner) {
+      const [cw, ch] = rot % 180 ? [rect.h, rect.w] : [rect.w, rect.h];
+      inner.style.width = ptExpr(cw);
+      inner.style.height = ptExpr(ch);
+    }
+  }
+
+  /* ---------- Handtekeningen en tekstvakken op de pagina ---------- */
+  function toolBtn(label, title, action, extraClass) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'anno-tool' + (extraClass ? ' ' + extraClass : '');
+    b.textContent = label;
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.dataset.action = action;
+    return b;
+  }
+
+  function buildAnnoEl(e, it, interactive) {
+    const box = document.createElement('div');
+    box.className = `anno anno-${it.type}`;
+    let inner;
+    if (it.type === 'sig') {
+      inner = document.createElement('img');
+      inner.src = it.src;
+      inner.alt = 'Handtekening';
+      inner.draggable = false;
+    } else {
+      inner = document.createElement('div');
+      inner.textContent = it.text;
+      inner.style.fontSize = ptExpr(it.size);
+      inner.style.color = it.color;
+    }
+    inner.className = 'anno-inner';
+    box.append(inner);
+    if (interactive) {
+      box.dataset.id = String(it.id);
+      box.setAttribute('role', 'group');
+      box.setAttribute('aria-label', it.type === 'sig' ? 'Handtekening' : `Tekstvak: ${it.text}`);
+      const tools = document.createElement('div');
+      tools.className = 'anno-tools';
+      if (it.type === 'text') {
+        tools.append(
+          toolBtn('A−', 'Kleinere letters', 'smaller'),
+          toolBtn('A+', 'Grotere letters', 'bigger'),
+          toolBtn('●', 'Andere kleur (zwart/blauw)', 'color', it.color === INK_BLUE ? '' : 'swatch-blue'),
+          toolBtn('Bewerk', 'Tekst bewerken', 'edit'),
+        );
+      }
+      tools.append(toolBtn('✕', 'Verwijderen', 'delete'));
+      box.append(tools);
+      if (it.type === 'sig') {
+        const h = document.createElement('div');
+        h.className = 'anno-handle';
+        h.title = 'Sleep om groter of kleiner te maken';
+        box.append(h);
+      }
+    }
+    placeBox(e, box, it, it.rot, inner, it.type === 'sig');
+    return { box, inner };
+  }
+
+  function refreshThumbAnnos(e) {
+    e.thumbAnnoLayer.replaceChildren(...e.annos.map((it) => buildAnnoEl(e, it, false).box));
+  }
+
+  function renderAnnos(e) {
+    if (editing) finishEditing();   // eerst de getypte tekst vastleggen, anders gaat die verloren
+    e.annoEls = new Map();
+    const boxes = [];
+    for (const it of e.annos) {
+      const v = buildAnnoEl(e, it, true);
+      if (state.activeAnno && state.activeAnno.it === it) v.box.classList.add('active');
+      e.annoEls.set(it.id, v);
+      boxes.push(v.box);
+    }
+    e.annoLayer.replaceChildren(...boxes);
+    refreshThumbAnnos(e);
+  }
+
+  function repositionAnnos(e) {
+    if (!e.annoEls) return;
+    for (const it of e.annos) {
+      const v = e.annoEls.get(it.id);
+      if (v) placeBox(e, v.box, it, it.rot, v.inner, it.type === 'sig');
+    }
+    refreshThumbAnnos(e);
+  }
+
+  // Meet een tekstvak na (de breedte volgt de tekst) en pas het vak aan.
+  function measureText(e, it) {
+    const v = e.annoEls.get(it.id);
+    if (!v) return;
+    const px = ptPx(e);
+    const cw = Math.max(v.inner.offsetWidth / px, it.size * 0.5);
+    const ch = Math.max(v.inner.offsetHeight / px, it.size * TEXT_LINE);
+    [it.w, it.h] = it.rot % 180 ? [ch, cw] : [cw, ch];
+    placeBox(e, v.box, it, it.rot, v.inner, false);
+  }
+
+  function setActiveAnno(e, it) {
+    const prev = state.activeAnno;
+    if (prev && prev.it !== it) {
+      if (editing && editing.it === prev.it) finishEditing();
+      const pv = prev.e.annoEls.get(prev.it.id);
+      if (pv) pv.box.classList.remove('active');
+    }
+    state.activeAnno = it ? { e, it } : null;
+    if (it) {
+      const v = e.annoEls.get(it.id);
+      if (v) v.box.classList.add('active');
+    }
+  }
+
+  function removeAnno(e, it, withUndo = true) {
+    if (withUndo) pushUndo(snapshot());
+    if (editing && editing.it === it) editing = null;
+    if (state.activeAnno && state.activeAnno.it === it) state.activeAnno = null;
+    e.annos = e.annos.filter((x) => x !== it);
+    renderAnnos(e);
+    markDirty();
+  }
+
+  // De pagina waarop een nieuw item komt: de pagina die nu in beeld is.
+  function placementTarget() {
+    if (!els.viewer.clientHeight) {
+      toast('Maak het venster breder om te ondertekenen of tekst toe te voegen.', 'error');
+      return null;
+    }
+    updateCurrent();
+    return state.current || state.entries[0] || null;
+  }
+
+  function visibleCenter(e) {
+    const pr = e.viewEl.getBoundingClientRect(), vr = els.viewer.getBoundingClientRect();
+    const px = pr.width / viewDims(e)[0];
+    const top = Math.max(pr.top, vr.top), bottom = Math.min(pr.bottom, vr.bottom);
+    const cy = top < bottom ? (top + bottom) / 2 : pr.top + pr.height / 2;
+    return [pr.width / 2 / px, (cy - pr.top) / px];
+  }
+
+  // Voeg een item toe, rechtop en gecentreerd in het zichtbare deel van de pagina. cw/ch in punten.
+  function addAnno(e, it, cw, ch) {
+    finishEditing();
+    const [Wv, Hv] = viewDims(e);
+    const [cx, cy] = visibleCenter(e);
+    const w = Math.min(cw, Wv), h = Math.min(ch, Hv);
+    const vr = { x: clamp(cx - w / 2, 0, Wv - w), y: clamp(cy - h / 2, 0, Hv - h), w, h };
+    it.id = nextAnnoId++;
+    it.rot = (360 - e.rotation) % 360;
+    Object.assign(it, mapRect(v2b, e, vr));
+    pushUndo(snapshot());
+    e.annos.push(it);
+    renderAnnos(e);
+    setActiveAnno(e, it);
+    markDirty();
+    return it;
+  }
+
+  function addTextAnno(text) {
+    const e = placementTarget();
+    if (!e) return;
+    const it = addAnno(e, { type: 'text', text, size: 12, color: INK_BLACK }, Math.max(40, text.length * 6.5), 12 * TEXT_LINE);
+    measureText(e, it);
+    refreshThumbAnnos(e);
+    if (!text) startEditing(e, it, true);
+  }
+
+  function placeSignature(sig) {
+    const e = placementTarget();
+    if (!e) return;
+    const [Wv] = viewDims(e);
+    const aspect = sig.w / sig.h || 3;
+    let cw = Math.min(170, Wv * 0.45), ch = cw / aspect;
+    if (ch > 80) { ch = 80; cw = ch * aspect; }
+    addAnno(e, { type: 'sig', src: sig.src }, cw, ch);
+    toast('Sleep de handtekening naar de juiste plek. Met het bolletje rechtsonder maak je hem groter of kleiner.');
+  }
+
+  /* Tekst bewerken */
+  let editing = null;   // { e, it, before }
+  function startEditing(e, it, isNew) {
+    const v = e.annoEls.get(it.id);
+    if (!v || it.type !== 'text') return;
+    setActiveAnno(e, it);
+    editing = { e, it, before: isNew ? null : snapshot() };
+    v.box.classList.add('editing');
+    v.inner.contentEditable = 'plaintext-only';
+    if (v.inner.contentEditable !== 'plaintext-only') v.inner.contentEditable = 'true';
+    v.inner.dataset.placeholder = 'Typ hier…';
+    v.inner.classList.toggle('empty', !it.text);
+    v.inner.focus();
+    const range = document.createRange();
+    range.selectNodeContents(v.inner);
+    if (!isNew) range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  function finishEditing() {
+    if (!editing) return;
+    const { e, it, before } = editing;
+    editing = null;
+    const v = e.annoEls.get(it.id);
+    const text = v ? v.inner.innerText.replace(/\r/g, '').replace(/\t/g, '    ').replace(/\n+$/, '') : it.text;
+    if (v) {
+      v.inner.contentEditable = 'false';
+      v.inner.classList.remove('empty');
+      v.box.classList.remove('editing');
+    }
+    if (!text.trim()) { removeAnno(e, it, !!before); return; }
+    if (text !== it.text) {
+      if (before) pushUndo(before);
+      it.text = text;
+      markDirty();
+    }
+    if (v) {
+      v.inner.textContent = it.text;
+      v.box.setAttribute('aria-label', `Tekstvak: ${it.text}`);
+      measureText(e, it);
+    }
+    refreshThumbAnnos(e);
+  }
+
+  function annoTool(action, e, it) {
+    if (action === 'delete') { removeAnno(e, it); return; }
+    if (action === 'edit') { startEditing(e, it, false); return; }
+    pushUndo(snapshot());
+    const v = e.annoEls.get(it.id);
+    if (action === 'smaller' || action === 'bigger') {
+      it.size = clamp(Math.round(it.size * (action === 'bigger' ? 1.15 : 1 / 1.15) * 2) / 2, 6, 96);
+      v.inner.style.fontSize = ptExpr(it.size);
+      measureText(e, it);
+    } else if (action === 'color') {
+      it.color = it.color === INK_BLUE ? INK_BLACK : INK_BLUE;
+      v.inner.style.color = it.color;
+      v.box.querySelector('[data-action="color"]').classList.toggle('swatch-blue', it.color !== INK_BLUE);
+    }
+    refreshThumbAnnos(e);
+    markDirty();
+  }
+
+  function nudgeAnno(e, it, dx, dy) {
+    const [Wv, Hv] = viewDims(e);
+    const vr = mapRect(b2v, e, it);
+    pushUndo(snapshot());
+    vr.x = clamp(vr.x + dx, 0, Wv - vr.w);
+    vr.y = clamp(vr.y + dy, 0, Hv - vr.h);
+    Object.assign(it, mapRect(v2b, e, vr));
+    const v = e.annoEls.get(it.id);
+    if (v) placeBox(e, v.box, it, it.rot, v.inner, it.type === 'sig');
+    refreshThumbAnnos(e);
+    markDirty();
+  }
+
+  const annoFromEl = (el) => {
+    const boxEl = el && el.closest && el.closest('.anno');
+    const pageEl = boxEl && boxEl.closest('.page');
+    const e = pageEl && byEl.get(pageEl);
+    const it = e && e.annos.find((x) => String(x.id) === boxEl.dataset.id);
+    return it ? { e, it, boxEl } : null;
+  };
+
+  /* Slepen en schalen */
+  let annoDrag = null;
+  els.pages.addEventListener('pointerdown', (ev) => {
+    const hit = annoFromEl(ev.target);
+    if (!hit) return;
+    const { e, it, boxEl } = hit;
+    if (ev.target.closest('.anno-tools')) { ev.preventDefault(); return; }   // knoppen: focus houden, actie bij klik
+    const onHandle = !!ev.target.closest('.anno-handle');
+    if (editing && editing.it === it && !onHandle) return;                   // tijdens bewerken: cursor plaatsen
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    const wasActive = !!state.activeAnno && state.activeAnno.it === it;
+    setActiveAnno(e, it);
+    annoDrag = {
+      e, it, wasActive, resize: onHandle, pointerId: ev.pointerId,
+      startX: ev.clientX, startY: ev.clientY, origV: mapRect(b2v, e, it), px: ptPx(e), moved: false,
+    };
+    try { boxEl.setPointerCapture(ev.pointerId); } catch (_) { /* geen actieve aanwijzer: slepen werkt dan via bubbling */ }
+  });
+  els.pages.addEventListener('pointermove', (ev) => {
+    const d = annoDrag;
+    if (!d || ev.pointerId !== d.pointerId) return;
+    const dxp = ev.clientX - d.startX, dyp = ev.clientY - d.startY;
+    if (!d.moved && Math.hypot(dxp, dyp) < 3) return;
+    if (!d.moved) { d.moved = true; pushUndo(snapshot()); }
+    const { e, it } = d;
+    const [Wv, Hv] = viewDims(e);
+    const dx = dxp / d.px, dy = dyp / d.px;
+    let vr;
+    if (d.resize) {
+      const ratio = d.origV.h / d.origV.w;
+      const w = Math.min(Math.max(24, d.origV.w + dx), Wv - d.origV.x, (Hv - d.origV.y) / ratio);
+      vr = { x: d.origV.x, y: d.origV.y, w, h: w * ratio };
+    } else {
+      vr = {
+        x: clamp(d.origV.x + dx, 0, Wv - d.origV.w), y: clamp(d.origV.y + dy, 0, Hv - d.origV.h),
+        w: d.origV.w, h: d.origV.h,
+      };
+    }
+    Object.assign(it, mapRect(v2b, e, vr));
+    const v = e.annoEls.get(it.id);
+    if (v) placeBox(e, v.box, it, it.rot, v.inner, it.type === 'sig');
+  });
+  function endAnnoDrag(ev) {
+    const d = annoDrag;
+    if (!d || ev.pointerId !== d.pointerId) return;
+    annoDrag = null;
+    if (d.moved) { refreshThumbAnnos(d.e); markDirty(); }
+    else if (ev.type === 'pointerup' && d.it.type === 'text' && d.wasActive) startEditing(d.e, d.it, false);
+  }
+  els.pages.addEventListener('pointerup', endAnnoDrag);
+  els.pages.addEventListener('pointercancel', endAnnoDrag);
+  els.pages.addEventListener('dblclick', (ev) => {
+    const hit = annoFromEl(ev.target);
+    if (hit && hit.it.type === 'text' && !editing) startEditing(hit.e, hit.it, false);
+  });
+  els.pages.addEventListener('input', (ev) => {
+    if (!editing || !ev.target.classList || !ev.target.classList.contains('anno-inner')) return;
+    ev.target.classList.toggle('empty', !ev.target.textContent);
+    measureText(editing.e, editing.it);
+  });
+  els.pages.addEventListener('focusout', (ev) => {
+    if (!editing) return;
+    const v = editing.e.annoEls.get(editing.it.id);
+    if (v && ev.target === v.inner && !(ev.relatedTarget && v.box.contains(ev.relatedTarget))) finishEditing();
+  });
+  // Plakken in een tekstvak altijd als platte tekst: geen opmaak, afbeeldingen of links.
+  els.pages.addEventListener('paste', (ev) => {
+    const inner = editing && ev.target.closest && ev.target.closest('.anno-inner');
+    if (!inner) return;
+    ev.preventDefault();
+    const text = ((ev.clipboardData && ev.clipboardData.getData('text/plain')) || '')
+      .replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
+    const sel = window.getSelection();
+    if (!text || !sel.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    const node = document.createTextNode(text);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    inner.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  // Iets anders dan bestanden in een tekstvak slepen: niet toestaan (zou opmaak kunnen meenemen).
+  els.pages.addEventListener('drop', (ev) => {
+    if (editing && ev.target.closest && ev.target.closest('.anno-inner') && !hasFiles(ev)) ev.preventDefault();
+  });
+
+  /* ---------- Formuliervelden ---------- */
+  async function loadFormFields(e, page) {
+    let annots;
+    try { annots = await page.getAnnotations({ intent: 'display' }); } catch (err) { console.warn(err); return; }
+    if (!e.alive && !state.entries.includes(e)) return;
+    const vp = page.getViewport({ scale: 1 });   // basisruimte
+    const fields = [];
+    for (const a of annots) {
+      if (a.annotationType !== pdfjsLib.AnnotationType.WIDGET || !a.fieldName || a.hidden) continue;
+      if (a.fieldType === 'Sig' || a.pushButton) continue;
+      const [x1, y1, x2, y2] = vp.convertToViewportRectangle(a.rect);
+      const box = { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+      if (box.w < 3 || box.h < 3) continue;
+      fields.push({ a, box });
+    }
+    e.formFields = fields;
+    renderFormFields(e);
+  }
+
+  function renderFormFields(e) {
+    const rec = state.files.get(e.fileId);
+    e.fieldEls = [];
+    const boxes = [];
+    for (const f of e.formFields || []) {
+      const ctl = makeFieldControl(rec, f);
+      if (!ctl) continue;
+      const box = document.createElement('div');
+      box.className = 'field';
+      box.append(ctl);
+      placeBox(e, box, f.box, 0, ctl, true);
+      e.fieldEls.push({ box, ctl, f });
+      boxes.push(box);
+    }
+    e.formLayer.replaceChildren(...boxes);
+  }
+
+  function positionFields(e) {
+    for (const x of e.fieldEls || []) placeBox(e, x.box, x.f.box, 0, x.ctl, true);
+  }
+
+  function makeFieldControl(rec, f) {
+    const a = f.a, name = a.fieldName;
+    const cur = rec.formValues.has(name) ? rec.formValues.get(name) : a.fieldValue;
+    const da = a.defaultAppearanceData && a.defaultAppearanceData.fontSize;
+    const fontSize = da > 0 ? da : clamp(f.box.h * 0.62, 6, 12);
+    let el;
+    if (a.fieldType === 'Tx') {
+      el = document.createElement(a.multiLine ? 'textarea' : 'input');
+      if (!a.multiLine) el.type = 'text';
+      el.value = typeof cur === 'string' ? cur : '';
+      if (a.maxLen > 0) el.maxLength = a.maxLen;
+      el.style.fontSize = ptExpr(fontSize);
+      el.style.textAlign = ['left', 'center', 'right'][a.textAlignment] || 'left';
+      el.addEventListener('input', () => setFieldValue(rec, name, el.value, el));
+    } else if (a.fieldType === 'Btn' && a.checkBox) {
+      el = document.createElement('input');
+      el.type = 'checkbox';
+      el.dataset.on = a.exportValue;
+      el.checked = cur === a.exportValue;
+      el.addEventListener('change', () => setFieldValue(rec, name, el.checked ? a.exportValue : 'Off', el));
+    } else if (a.fieldType === 'Btn' && a.radioButton) {
+      el = document.createElement('input');
+      el.type = 'radio';
+      el.name = `veld-${rec.id}-${name}`;
+      el.value = a.buttonValue;
+      el.checked = cur === a.buttonValue;
+      el.addEventListener('change', () => { if (el.checked) setFieldValue(rec, name, a.buttonValue, el); });
+    } else if (a.fieldType === 'Ch') {
+      el = document.createElement('select');
+      const vals = Array.isArray(cur) ? cur : (cur != null ? [cur] : []);
+      if (a.combo) el.append(new Option('', ''));
+      for (const o of a.options || []) {
+        const opt = new Option(o.displayValue, o.displayValue);
+        opt.selected = vals.includes(o.exportValue) || vals.includes(o.displayValue);
+        el.append(opt);
+      }
+      el.style.fontSize = ptExpr(fontSize);
+      el.addEventListener('change', () => setFieldValue(rec, name, el.value, el));
+    } else {
+      return null;
+    }
+    el.classList.add('field-ctl');
+    el.disabled = !!a.readOnly;
+    el.setAttribute('aria-label', a.alternativeText || name);
+    if (a.alternativeText) el.title = a.alternativeText;
+    if (!rec.formInputs.has(name)) rec.formInputs.set(name, new Set());
+    rec.formInputs.get(name).add(el);
+    return el;
+  }
+
+  // Hetzelfde veld kan op meer plekken staan: houd ze gelijk.
+  function setFieldValue(rec, name, value, src) {
+    rec.formValues.set(name, value);
+    for (const other of rec.formInputs.get(name) || []) {
+      if (other === src || !other.isConnected) continue;
+      if (other.type === 'checkbox') other.checked = value === other.dataset.on;
+      else if (other.type === 'radio') other.checked = other.value === value;
+      else other.value = value;
+    }
+    markDirty();
+  }
+
+  /* ---------- Handtekeningen maken en lokaal bewaren ---------- */
+  // Bewaard in localStorage van deze website, dus alleen in deze browser op dit apparaat.
+  // Met een pincode of wachtwoord wordt de handtekening versleuteld bewaard:
+  // AES-GCM 256 bit, met een sleutel afgeleid via PBKDF2-SHA256 (600.000 rondes, eigen salt per handtekening).
+  const SIG_KEY = 'pdf-samenvoegen:handtekeningen';
+  const MAX_SIGS = 8;
+  const PIN_MIN = 6;
+  const PBKDF2_ITER = 600000;
+  const PNG_PREFIX = 'data:image/png;base64,';
+  const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+  const sessionSigs = [];       // gebruikt maar niet bewaard
+  const unlocked = new Map();   // id -> ontsleutelde afbeelding; alleen in het geheugen, tot het tabblad sluit
+  const canEncrypt = () => !!(window.isSecureContext && window.crypto && window.crypto.subtle);
+
+  // Strenge controle van alles wat uit de opslag komt (die kan door iets anders zijn aangepast).
+  const validDim = (n) => Number.isInteger(n) && n > 0 && n <= 4000;
+  const isB64 = (s, maxLen) => typeof s === 'string' && s.length > 0 && s.length <= maxLen && s.length % 4 === 0 && B64_RE.test(s);
+  // Alleen echte PNG-afbeeldingen ('iVBORw0KGgo' = de vaste PNG-kop) van redelijke grootte.
+  const isPngDataUrl = (s) => typeof s === 'string' && s.startsWith(PNG_PREFIX + 'iVBORw0KGgo') && isB64(s.slice(PNG_PREFIX.length), 3e6);
+
+  function validStoredSig(s) {
+    if (!s || typeof s !== 'object' || typeof s.id !== 'string' || !/^[a-z0-9]{4,40}$/i.test(s.id)) return false;
+    if (!validDim(s.w) || !validDim(s.h)) return false;
+    if (s.enc) {
+      const e = s.enc;
+      return !('src' in s) && e.v === 1 && Number.isInteger(e.iter) && e.iter >= 100000 && e.iter <= 5000000
+        && isB64(e.salt, 24) && e.salt.length === 24 && isB64(e.iv, 16) && e.iv.length === 16 && isB64(e.data, 4.2e6);
+    }
+    return isPngDataUrl(s.src);
+  }
+
+  function loadSigs() {
+    try {
+      const list = JSON.parse(localStorage.getItem(SIG_KEY) || '[]');
+      return Array.isArray(list) ? list.filter(validStoredSig).slice(0, MAX_SIGS) : [];
+    } catch (_) {
+      return [];
+    }
+  }
+  function storeSigs(list) {
+    try { localStorage.setItem(SIG_KEY, JSON.stringify(list.slice(0, MAX_SIGS))); return true; } catch (_) { return false; }
+  }
+
+  /* Versleuteling (Web Crypto, ingebouwd in de browser) */
+  const toB64 = (u8) => {
+    let s = '';
+    for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+    return btoa(s);
+  };
+  const fromB64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const utf8 = (s) => new TextEncoder().encode(s);
+
+  async function deriveKey(pin, salt, iterations) {
+    const base = await crypto.subtle.importKey('raw', utf8(pin.normalize('NFC')), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, base,
+      { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'],
+    );
+  }
+  async function encryptSig(sig, pin) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(pin, salt, PBKDF2_ITER);
+    // Het id wordt meegewogen, zodat versleutelde gegevens niet tussen handtekeningen kunnen worden verwisseld.
+    const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: utf8(sig.id) }, key, utf8(sig.src)));
+    return { id: sig.id, w: sig.w, h: sig.h, enc: { v: 1, iter: PBKDF2_ITER, salt: toB64(salt), iv: toB64(iv), data: toB64(data) } };
+  }
+  // Geeft de afbeelding terug, of null bij een verkeerde code of aangepaste gegevens.
+  async function decryptSig(stored, pin) {
+    try {
+      const e = stored.enc;
+      const key = await deriveKey(pin, fromB64(e.salt), e.iter);
+      const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(e.iv), additionalData: utf8(stored.id) }, key, fromB64(e.data));
+      const src = new TextDecoder().decode(plain);
+      return isPngDataUrl(src) ? src : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Laatste controle voor gebruik: is het echt een leesbare afbeelding met de opgegeven afmetingen?
+  async function verifySigImage(sig) {
+    if (!isPngDataUrl(sig.src)) return false;
+    const img = new Image();
+    img.src = sig.src;
+    try { await img.decode(); } catch (_) { return false; }
+    return img.naturalWidth === sig.w && img.naturalHeight === sig.h;
+  }
+  async function useSignature(sig) {
+    if (!(await verifySigImage(sig))) {
+      toast('Deze bewaarde handtekening is beschadigd of aangepast en wordt niet gebruikt. Verwijder hem en maak een nieuwe.', 'error');
+      return;
+    }
+    placeSignature(sig);
+  }
+
+  function renderSigList() {
+    const rows = [
+      ...sessionSigs.map((sig) => ({ sig, saved: false, locked: false, secured: false })),
+      ...loadSigs().map((s) => {
+        if (!s.enc) return { sig: s, saved: true, locked: false, secured: false };
+        if (unlocked.has(s.id)) return { sig: { id: s.id, w: s.w, h: s.h, src: unlocked.get(s.id) }, saved: true, locked: false, secured: true };
+        return { sig: s, saved: true, locked: true, secured: true };
+      }),
+    ];
+    els.btnLockSigs.hidden = unlocked.size === 0;
+    if (!rows.length) {
+      const p = document.createElement('p');
+      p.className = 'menu-empty';
+      p.textContent = 'Nog geen handtekening.';
+      els.sigList.replaceChildren(p);
+      return;
+    }
+    els.sigList.replaceChildren(...rows.map(({ sig, saved, locked, secured }) => {
+      const row = document.createElement('div');
+      row.className = 'sig-item';
+      const use = document.createElement('button');
+      use.type = 'button';
+      use.className = 'sig-use';
+      use.setAttribute('role', 'menuitem');
+      if (locked) {
+        use.classList.add('sig-locked');
+        const t = document.createElement('span');
+        t.textContent = '🔒 Beveiligde handtekening';
+        const sub = document.createElement('small');
+        sub.textContent = 'Klik en voer je code in';
+        use.append(t, sub);
+        use.setAttribute('aria-label', 'Beveiligde handtekening ontgrendelen en plaatsen');
+        use.addEventListener('click', () => { closeSigMenu(); openPinDialog(sig); });
+      } else {
+        const img = document.createElement('img');
+        img.src = sig.src;
+        img.alt = '';
+        use.append(img);
+        use.setAttribute('aria-label', 'Plaats deze handtekening');
+        if (secured) use.title = 'Beveiligd; ontgrendeld tot je dit tabblad sluit';
+        use.addEventListener('click', () => { closeSigMenu(); useSignature(sig); });
+      }
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'sig-del';
+      del.textContent = '✕';
+      del.title = saved ? 'Verwijder van dit apparaat' : 'Verwijder';
+      del.setAttribute('aria-label', del.title);
+      del.addEventListener('click', () => {
+        if (saved) {
+          if (!confirm('Deze handtekening van dit apparaat verwijderen?')) return;
+          storeSigs(loadSigs().filter((s) => s.id !== sig.id));
+          unlocked.delete(sig.id);
+        } else {
+          sessionSigs.splice(sessionSigs.indexOf(sig), 1);
+        }
+        renderSigList();
+      });
+      row.append(use, del);
+      return row;
+    }));
+  }
+
+  /* Pincode invoeren om een beveiligde handtekening te gebruiken */
+  let pinTarget = null, pinFails = 0;
+  function openPinDialog(stored) {
+    if (!canEncrypt()) {
+      toast('Beveiligde handtekeningen kunnen alleen via een beveiligde (https) verbinding worden geopend.', 'error');
+      return;
+    }
+    pinTarget = stored;
+    els.pinInput.value = '';
+    els.pinError.hidden = true;
+    els.pinDialog.showModal();
+    els.pinInput.focus();
+  }
+  async function submitPin() {
+    if (!pinTarget || els.btnPinOk.classList.contains('busy') || !els.pinInput.value) return;
+    const pin = els.pinInput.value;
+    const target = pinTarget;
+    els.btnPinOk.classList.add('busy');
+    els.btnPinOk.textContent = 'Controleren…';
+    const src = await decryptSig(target, pin);
+    if (!src) {
+      // Na elke verkeerde poging iets langer wachten (tegen raden).
+      pinFails++;
+      const secs = Math.min(pinFails, 10);
+      els.pinError.textContent = `Onjuiste code. Je kunt het over ${secs} ${secs === 1 ? 'seconde' : 'seconden'} opnieuw proberen.`;
+      els.pinError.hidden = false;
+      els.pinInput.select();
+      setTimeout(() => { els.btnPinOk.classList.remove('busy'); els.btnPinOk.textContent = 'Ontgrendel'; }, secs * 1000);
+      return;
+    }
+    pinFails = 0;
+    unlocked.set(target.id, src);
+    els.btnPinOk.classList.remove('busy');
+    els.btnPinOk.textContent = 'Ontgrendel';
+    els.pinInput.value = '';
+    els.pinDialog.close();
+    useSignature({ id: target.id, w: target.w, h: target.h, src });
+    // Gemak: dezelfde code ook proberen op andere beveiligde handtekeningen.
+    for (const s of loadSigs()) {
+      if (s.enc && !unlocked.has(s.id)) {
+        const other = await decryptSig(s, pin);
+        if (other) unlocked.set(s.id, other);
+      }
+    }
+  }
+  els.btnPinOk.addEventListener('click', submitPin);
+  els.btnPinCancel.addEventListener('click', () => els.pinDialog.close());
+  els.pinDialog.addEventListener('close', () => { pinTarget = null; els.pinInput.value = ''; });
+  els.pinInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); submitPin(); }
+  });
+  els.btnLockSigs.addEventListener('click', () => {
+    unlocked.clear();
+    closeSigMenu();
+    toast('Beveiligde handtekeningen zijn weer vergrendeld.');
+  });
+
+  function openSigMenu() {
+    renderSigList();
+    els.sigMenu.hidden = false;
+    els.btnSign.setAttribute('aria-expanded', 'true');
+    const r = els.btnSign.getBoundingClientRect();
+    const mw = els.sigMenu.offsetWidth;
+    els.sigMenu.style.top = `${r.bottom + 6}px`;
+    els.sigMenu.style.left = `${clamp(r.right - mw, 8, window.innerWidth - mw - 8)}px`;
+    const first = els.sigMenu.querySelector('.sig-use, .menu-item');
+    if (first) first.focus();
+  }
+  function closeSigMenu() {
+    if (els.sigMenu.hidden) return;
+    els.sigMenu.hidden = true;
+    els.btnSign.setAttribute('aria-expanded', 'false');
+  }
+  els.btnSign.addEventListener('click', () => {
+    if (!els.sigMenu.hidden) { closeSigMenu(); return; }
+    if (!placementTarget()) return;
+    if (!loadSigs().length && !sessionSigs.length) openSigDialog();
+    else openSigMenu();
+  });
+  document.addEventListener('pointerdown', (ev) => {
+    if (!els.sigMenu.hidden && !els.sigMenu.contains(ev.target) && !els.btnSign.contains(ev.target)) closeSigMenu();
+  });
+  els.btnNewSig.addEventListener('click', () => { closeSigMenu(); openSigDialog(); });
+  els.btnAddDate.addEventListener('click', () => { closeSigMenu(); addTextAnno(new Date().toLocaleDateString('nl-NL')); });
+  els.btnText.addEventListener('click', () => addTextAnno(''));
+
+  /* Dialoog: tekenen, typen of afbeelding */
+  const pad = { ctx: null, drawing: false, last: null, hasInk: false, ink: '#111111', dpr: 1 };
+  let sigTab = 'draw', sigImageCanvas = null;
+
+  function setupPad() {
+    const c = els.sigPad;
+    pad.dpr = Math.min(window.devicePixelRatio || 1, 3);
+    c.width = Math.round(c.clientWidth * pad.dpr);
+    c.height = Math.round(c.clientHeight * pad.dpr);
+    pad.ctx = c.getContext('2d');
+    pad.ctx.lineCap = 'round';
+    pad.ctx.lineJoin = 'round';
+    pad.hasInk = false;
+  }
+  function padPoint(ev) {
+    const r = els.sigPad.getBoundingClientRect();
+    return [(ev.clientX - r.left) * pad.dpr, (ev.clientY - r.top) * pad.dpr];
+  }
+  els.sigPad.addEventListener('pointerdown', (ev) => {
+    if (!pad.ctx) setupPad();
+    ev.preventDefault();
+    try { els.sigPad.setPointerCapture(ev.pointerId); } catch (_) { /* negeer */ }
+    pad.drawing = true;
+    pad.last = padPoint(ev);
+    pad.ctx.strokeStyle = pad.ink;
+    pad.ctx.fillStyle = pad.ink;
+    pad.ctx.beginPath();
+    pad.ctx.arc(pad.last[0], pad.last[1], 1.4 * pad.dpr, 0, Math.PI * 2);
+    pad.ctx.fill();
+    pad.hasInk = true;
+  });
+  els.sigPad.addEventListener('pointermove', (ev) => {
+    if (!pad.drawing) return;
+    const events = typeof ev.getCoalescedEvents === 'function' ? ev.getCoalescedEvents() : [ev];
+    for (const pe of events.length ? events : [ev]) {
+      const p = padPoint(pe);
+      const pressure = pe.pointerType === 'pen' && pe.pressure > 0 ? pe.pressure : 0.5;
+      pad.ctx.lineWidth = (1.6 + pressure * 2.2) * pad.dpr;
+      const mid = [(pad.last[0] + p[0]) / 2, (pad.last[1] + p[1]) / 2];
+      pad.ctx.beginPath();
+      pad.ctx.moveTo(pad.last[0], pad.last[1]);
+      pad.ctx.quadraticCurveTo(pad.last[0], pad.last[1], mid[0], mid[1]);
+      pad.ctx.lineTo(p[0], p[1]);
+      pad.ctx.stroke();
+      pad.last = p;
+    }
+  });
+  const stopPad = () => { pad.drawing = false; };
+  els.sigPad.addEventListener('pointerup', stopPad);
+  els.sigPad.addEventListener('pointercancel', stopPad);
+  els.btnClearPad.addEventListener('click', setupPad);
+  for (const b of document.querySelectorAll('.ink')) {
+    b.addEventListener('click', () => {
+      pad.ink = b.dataset.ink;
+      for (const o of document.querySelectorAll('.ink')) o.setAttribute('aria-checked', String(o === b));
+    });
+  }
+
+  function selectSigTab(name) {
+    sigTab = name;
+    const map = { draw: ['tabDraw', 'panelDraw'], type: ['tabType', 'panelType'], image: ['tabImage', 'panelImage'] };
+    for (const [key, [tabId, panelId]] of Object.entries(map)) {
+      const on = key === name;
+      const tab = $(tabId);
+      tab.setAttribute('aria-selected', String(on));
+      tab.tabIndex = on ? 0 : -1;
+      $(panelId).hidden = !on;
+    }
+    els.sigError.hidden = true;
+    if (name === 'draw' && !pad.ctx) setupPad();
+    if (name === 'type') els.sigTypeInput.focus();
+  }
+  $('tabDraw').addEventListener('click', () => selectSigTab('draw'));
+  $('tabType').addEventListener('click', () => selectSigTab('type'));
+  $('tabImage').addEventListener('click', () => selectSigTab('image'));
+  document.querySelector('.tabs').addEventListener('keydown', (ev) => {
+    const order = ['draw', 'type', 'image'];
+    const i = order.indexOf(sigTab);
+    if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+      ev.preventDefault();
+      const next = order[(i + (ev.key === 'ArrowRight' ? 1 : 2)) % 3];
+      selectSigTab(next);
+      $({ draw: 'tabDraw', type: 'tabType', image: 'tabImage' }[next]).focus();
+    }
+  });
+  els.sigTypeInput.addEventListener('input', () => { els.sigTypePreview.textContent = els.sigTypeInput.value; });
+
+  els.sigImageInput.addEventListener('change', async () => {
+    const file = els.sigImageInput.files && els.sigImageInput.files[0];
+    sigImageCanvas = null;
+    els.sigImagePreview.replaceChildren();
+    if (!file) return;
+    if (!/^image\/(png|jpeg)$/.test(file.type) || file.size > 15 * 1048576) {
+      showSigError('Kies een PNG- of JPG-afbeelding van maximaal 15 MB.');
+      return;
+    }
+    try {
+      const bmp = await createImageBitmap(file);
+      const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(bmp.width * scale));
+      c.height = Math.max(1, Math.round(bmp.height * scale));
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(bmp, 0, 0, c.width, c.height);
+      bmp.close();
+      // Witte (lichte) achtergrond doorzichtig maken; zachte overgang voor nette randen.
+      const img = ctx.getImageData(0, 0, c.width, c.height);
+      const d = img.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        if (lum >= 225) d[i + 3] = 0;
+        else if (lum > 170) d[i + 3] = Math.round(d[i + 3] * (225 - lum) / 55);
+      }
+      ctx.putImageData(img, 0, 0);
+      sigImageCanvas = c;
+      const preview = document.createElement('img');
+      preview.alt = 'Voorbeeld van de handtekening';
+      preview.src = c.toDataURL('image/png');
+      els.sigImagePreview.append(preview);
+      els.sigError.hidden = true;
+    } catch (err) {
+      console.warn(err);
+      showSigError('Deze afbeelding kon niet worden gelezen.');
+    }
+  });
+
+  function showSigError(msg) {
+    els.sigError.textContent = msg;
+    els.sigError.hidden = false;
+  }
+
+  // Snijd lege randen weg en maak een PNG met doorzichtige achtergrond.
+  function trimToPng(src) {
+    const ctx = src.getContext('2d', { willReadFrequently: true });
+    const { width, height } = src;
+    const data = ctx.getImageData(0, 0, width, height).data;
+    let x0 = width, y0 = height, x1 = -1, y1 = -1;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (data[(y * width + x) * 4 + 3] > 8) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+      }
+    }
+    if (x1 < 0) return null;
+    const padPx = 4;
+    x0 = Math.max(0, x0 - padPx); y0 = Math.max(0, y0 - padPx);
+    x1 = Math.min(width - 1, x1 + padPx); y1 = Math.min(height - 1, y1 + padPx);
+    const w = x1 - x0 + 1, h = y1 - y0 + 1;
+    const scale = Math.min(1, 1200 / w);
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(w * scale));
+    out.height = Math.max(1, Math.round(h * scale));
+    out.getContext('2d').drawImage(src, x0, y0, w, h, 0, 0, out.width, out.height);
+    return { src: out.toDataURL('image/png'), w: out.width, h: out.height };
+  }
+
+  function typedSignatureCanvas(text) {
+    const font = `72px ${getComputedStyle(els.sigTypePreview).fontFamily}`;
+    const c = document.createElement('canvas');
+    let ctx = c.getContext('2d');
+    ctx.font = font;
+    const width = Math.ceil(ctx.measureText(text).width) + 40;
+    c.width = Math.min(width, 4000);
+    c.height = 150;
+    ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.font = font;
+    ctx.fillStyle = '#111111';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, 20, 75);
+    return c;
+  }
+
+  function openSigDialog() {
+    els.sigError.hidden = true;
+    els.sigTypeInput.value = '';
+    els.sigTypePreview.textContent = '';
+    els.sigImageInput.value = '';
+    els.sigImagePreview.replaceChildren();
+    sigImageCanvas = null;
+    els.sigUsePin.checked = false;
+    els.sigPin.value = '';
+    els.sigPin2.value = '';
+    updatePinRow();
+    els.sigDialog.showModal();
+    pad.ctx = null;
+    selectSigTab('draw');
+  }
+
+  function updatePinRow() {
+    els.pinRow.hidden = !els.sigRemember.checked || !canEncrypt();
+    els.pinFields.hidden = els.pinRow.hidden || !els.sigUsePin.checked;
+  }
+  els.sigRemember.addEventListener('change', updatePinRow);
+  els.sigUsePin.addEventListener('change', () => {
+    updatePinRow();
+    if (els.sigUsePin.checked) els.sigPin.focus();
+  });
+  // Codes niet langer dan nodig in het venster laten staan.
+  els.sigDialog.addEventListener('close', () => { els.sigPin.value = ''; els.sigPin2.value = ''; });
+
+  els.btnSigCancel.addEventListener('click', () => els.sigDialog.close());
+  els.btnSigUse.addEventListener('click', async () => {
+    if (els.btnSigUse.classList.contains('busy')) return;
+    const usePin = els.sigRemember.checked && els.sigUsePin.checked && canEncrypt();
+    if (usePin) {
+      if (els.sigPin.value.length < PIN_MIN) { showSigError(`Kies een code van minimaal ${PIN_MIN} tekens.`); els.sigPin.focus(); return; }
+      if (els.sigPin.value !== els.sigPin2.value) { showSigError('De twee codes zijn niet hetzelfde.'); els.sigPin2.focus(); return; }
+    }
+    let canvas = null;
+    if (sigTab === 'draw') {
+      if (!pad.hasInk) { showSigError('Teken eerst je handtekening.'); return; }
+      canvas = els.sigPad;
+    } else if (sigTab === 'type') {
+      const text = els.sigTypeInput.value.trim();
+      if (!text) { showSigError('Typ eerst je naam.'); return; }
+      canvas = typedSignatureCanvas(text);
+    } else {
+      if (!sigImageCanvas) { showSigError('Kies eerst een afbeelding.'); return; }
+      canvas = sigImageCanvas;
+    }
+    const png = trimToPng(canvas);
+    if (!png) { showSigError('Er is geen handtekening te zien.'); return; }
+    const rand = toB64(crypto.getRandomValues(new Uint8Array(6))).replace(/[^a-z0-9]/gi, '');
+    const sig = { id: `s${Date.now().toString(36)}${rand}`.slice(0, 40), ...png };
+    if (els.sigRemember.checked) {
+      let entry = sig;
+      if (usePin) {
+        els.btnSigUse.classList.add('busy');
+        els.btnSigUse.textContent = 'Versleutelen…';
+        try {
+          entry = await encryptSig(sig, els.sigPin.value);
+        } catch (err) {
+          console.warn(err);
+          showSigError('Versleutelen lukte niet. Probeer het opnieuw of bewaar zonder code.');
+          return;
+        } finally {
+          els.btnSigUse.classList.remove('busy');
+          els.btnSigUse.textContent = 'Plaats handtekening';
+        }
+        unlocked.set(sig.id, sig.src);   // deze sessie direct bruikbaar
+      }
+      if (!storeSigs([entry, ...loadSigs()])) {
+        unlocked.delete(sig.id);
+        sessionSigs.unshift(sig);
+        toast('Bewaren op dit apparaat lukte niet (opslag vol of uitgeschakeld). De handtekening werkt wel zolang dit venster open is.', 'error');
+      }
+    } else {
+      sessionSigs.unshift(sig);
+    }
+    els.sigDialog.close();
+    placeSignature(sig);
+  });
+
+  /* ================= Bestanden laden ================= */
   let loadChain = Promise.resolve();
   // `list` mag een FileList, array of een Promise daarvan zijn; de volgorde van aanbieden blijft behouden.
   function addFiles(list) {
@@ -370,7 +1407,14 @@
       throw new Error(`“${file.name}” kon niet worden weergegeven.`);
     }
     const id = nextFileId++;
-    const rec = { id, name: file.name, color: COLORS[(id - 1) % COLORS.length], lib, pdf, pageCount: count };
+    let hasForm = false;
+    try {
+      hasForm = !!lib.catalog.get(PDFLib.PDFName.of('AcroForm')) && lib.getForm().getFields().length > 0;
+    } catch (_) { hasForm = false; }
+    const rec = {
+      id, name: file.name, color: COLORS[(id - 1) % COLORS.length], lib, pdf, pageCount: count,
+      bytes, hasForm, formValues: new Map(), formInputs: new Map(),
+    };
     state.files.set(id, rec);
     if (state.sourceId == null) {
       state.sourceId = id;
@@ -522,6 +1566,7 @@
   els.thumbs.addEventListener('click', (ev) => {
     const t = ev.target.closest('.thumb');
     if (!t) return;
+    setActiveAnno(null, null);   // anders zou Delete een handtekening wissen in plaats van de pagina
     const e = byEl.get(t);
     const mod = ev.metaKey || ev.ctrlKey;
     if (ev.shiftKey && state.anchor != null && byId.get(state.anchor) && byId.get(state.anchor).alive) {
@@ -537,6 +1582,14 @@
   });
 
   els.pages.addEventListener('click', (ev) => {
+    const tool = ev.target.closest('.anno-tool');
+    if (tool) {
+      const hit = annoFromEl(tool);
+      if (hit) annoTool(tool.dataset.action, hit.e, hit.it);
+      return;
+    }
+    if (!ev.target.closest('.anno')) setActiveAnno(null, null);
+    if (ev.target.closest('.field')) return;
     const p = ev.target.closest('.page');
     if (!p) return;
     const e = byEl.get(p);
@@ -549,15 +1602,19 @@
   /* ---------------- Bewerkingen ---------------- */
   function snapshot() {
     return {
-      order: state.entries.map((e) => [e, e.rotation]),
+      order: state.entries.map((e) => [e, e.rotation, e.annos.map((a) => ({ ...a }))]),
       selected: [...state.selected], anchor: state.anchor, focusId: state.focusId,
     };
   }
   function restore(s) {
+    editing = null;
+    state.activeAnno = null;
     for (const e of state.entries) e.alive = false;
-    state.entries = s.order.map(([e, r]) => {
+    state.entries = s.order.map(([e, r, annos]) => {
       e.alive = true;
       if (e.rotation !== r) { e.rotation = r; afterRotate(e); }
+      e.annos = annos.map((a) => ({ ...a }));
+      renderAnnos(e);
       return e;
     });
     const live = new Set(state.entries.map((e) => e.id));
@@ -656,6 +1713,9 @@
     state.entries = [];
     state.selected = new Set();
     state.anchor = state.focusId = state.current = state.sourceId = state.sourceHandle = null;
+    state.activeAnno = null;
+    editing = null;
+    closeSigMenu();
     state.undo = []; state.redo = [];
     state.dirty = false;
     els.thumbs.replaceChildren();
@@ -711,8 +1771,116 @@
     return removed;
   }
 
+  // Alleen tekens die het standaardlettertype (Helvetica, WinAnsi) kent; de rest wordt een vraagteken.
+  function winAnsi(font, str) {
+    const set = new Set(font.getCharacterSet());
+    let out = '';
+    for (const ch of String(str).replace(/\t/g, '    ')) {
+      const cp = ch.codePointAt(0);
+      out += cp === 10 || set.has(cp) ? ch : '?';
+    }
+    return out;
+  }
+
+  // Ingevulde formulierwaarden in een verse kopie van het bronbestand zetten en de velden "plat" maken,
+  // zodat de waarden vast in de pagina staan (en bij samenvoegen niet verloren gaan).
+  async function fillForm(rec, issues) {
+    const { PDFDocument, PDFTextField, PDFCheckBox, PDFRadioGroup, PDFDropdown, PDFOptionList, StandardFonts } = PDFLib;
+    let doc, form;
+    try {
+      doc = await PDFDocument.load(rec.bytes, { updateMetadata: false });
+      form = doc.getForm();
+    } catch (err) {
+      console.warn(err);
+      issues.push(rec.name);
+      return rec.lib;
+    }
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    for (const [name, value] of rec.formValues) {
+      try {
+        const field = form.getField(name);
+        if (field instanceof PDFTextField) {
+          const text = winAnsi(font, value || '');
+          field.setText(text || undefined);
+        } else if (field instanceof PDFCheckBox) {
+          if (value && value !== 'Off') field.check(); else field.uncheck();
+        } else if (field instanceof PDFRadioGroup) {
+          if (value && value !== 'Off') field.select(value); else field.clear();
+        } else if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
+          if (value) field.select(value); else field.clear();
+        }
+        // Tekst- en keuzevelden opnieuw tekenen; vinkjes en keuzerondjes houden hun eigen uiterlijk.
+        if (field instanceof PDFTextField || field instanceof PDFDropdown || field instanceof PDFOptionList) {
+          field.defaultUpdateAppearances(font);
+        }
+      } catch (err) {
+        console.warn('Veld kon niet worden ingevuld:', name, err);
+        issues.push(name);
+      }
+    }
+    flattenForm(form);
+    return doc;
+  }
+
+  // Zoals pdf-lib's form.flatten(), maar per veld: één vreemd veld laat niet het hele formulier mislukken.
+  function flattenForm(form) {
+    const { pushGraphicsState, popGraphicsState, translate, drawObject } = PDFLib;
+    for (const field of form.getFields()) {
+      for (const widget of field.acroField.getWidgets()) {
+        try {
+          const page = form.findWidgetPage(widget);
+          const ref = form.findWidgetAppearanceRef(field, widget);
+          const key = page.node.newXObject('FlatWidget', ref);
+          const r = widget.getRectangle();
+          page.pushOperators(pushGraphicsState(), translate(r.x, r.y), drawObject(key), popGraphicsState());
+        } catch (_) { /* veld zonder weergave: niets te tekenen */ }
+      }
+      try { form.removeField(field); } catch (_) { /* negeer */ }
+    }
+  }
+
+  // Teken een handtekening of tekstvak op een pagina. p = eigen draaiing van de pagina (zonder onze extra draaiing).
+  async function drawAnno(out, page, p, it, font, images) {
+    const { degrees, rgb } = PDFLib;
+    const box = page.getCropBox();
+    const x0 = box.x, y0 = box.y, W = box.width, H = box.height;
+    // basisruimte (linksboven, y omlaag) -> PDF-coördinaten (linksonder, y omhoog)
+    const toUser = (bx, by) => {
+      switch (p) {
+        case 90: return [x0 + by, y0 + bx];
+        case 180: return [x0 + W - bx, y0 + by];
+        case 270: return [x0 + W - by, y0 + H - bx];
+        default: return [x0 + bx, y0 + H - by];
+      }
+    };
+    const [cw, ch] = contentDims(it);
+    const [cx, cy] = toUser(it.x + it.w / 2, it.y + it.h / 2);
+    const theta = ((p - it.rot) % 360 + 360) % 360;   // draaiing tegen de klok in, in PDF-coördinaten
+    const cos = Math.round(Math.cos(theta * Math.PI / 180)), sin = Math.round(Math.sin(theta * Math.PI / 180));
+    // punt in de inhoud (linksboven, y omlaag) -> PDF-coördinaten
+    const local = (lx, ly) => {
+      const ux = lx - cw / 2, uy = ch / 2 - ly;
+      return [cx + ux * cos - uy * sin, cy + ux * sin + uy * cos];
+    };
+    if (it.type === 'sig') {
+      let img = images.get(it.src);
+      if (!img) { img = await out.embedPng(it.src); images.set(it.src, img); }
+      const [x, y] = local(0, ch);
+      page.drawImage(img, { x, y, width: cw, height: ch, rotate: degrees(theta) });
+    } else {
+      const n = parseInt(it.color.slice(1), 16);
+      const color = rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
+      it.text.split('\n').forEach((line, i) => {
+        if (!line) return;
+        const [x, y] = local(0, (i * TEXT_LINE + TEXT_BASELINE) * it.size);
+        page.drawText(winAnsi(font, line), { x, y, size: it.size, font, color, rotate: degrees(theta) });
+      });
+    }
+  }
+
   async function buildPdf(title) {
-    const { PDFDocument, degrees } = PDFLib;
+    const { PDFDocument, degrees, StandardFonts } = PDFLib;
+    finishEditing();
     const out = await PDFDocument.create();
     // Kopieer per bronbestand in één keer (gedeelde lettertypen/afbeeldingen worden zo maar één keer opgenomen).
     const perFile = new Map();
@@ -720,20 +1888,25 @@
       if (!perFile.has(e.fileId)) perFile.set(e.fileId, []);
       perFile.get(e.fileId).push(e.pageIndex);
     }
+    const formIssues = [];
     const copied = new Map();
     for (const [fileId, indices] of perFile) {
-      copied.set(fileId, await out.copyPages(state.files.get(fileId).lib, indices));
+      const rec = state.files.get(fileId);
+      const source = rec.formValues.size ? await fillForm(rec, formIssues) : rec.lib;
+      copied.set(fileId, await out.copyPages(source, indices));
     }
+    const needsFont = state.entries.some((e) => e.annos.some((it) => it.type === 'text'));
+    const font = needsFont ? await out.embedFont(StandardFonts.Helvetica) : null;
+    const images = new Map();
     const cursor = new Map();
     for (const e of state.entries) {
       const i = cursor.get(e.fileId) || 0;
       cursor.set(e.fileId, i + 1);
       const page = copied.get(e.fileId)[i];
-      if (e.rotation) {
-        const angle = (((page.getRotation().angle || 0) + e.rotation) % 360 + 360) % 360;
-        page.setRotation(degrees(angle));
-      }
+      const ownRotation = (((page.getRotation().angle || 0) % 360) + 360) % 360;
+      if (e.rotation) page.setRotation(degrees((ownRotation + e.rotation) % 360));
       out.addPage(page);
+      for (const it of e.annos) await drawAnno(out, page, ownRotation, it, font, images);
     }
     const src = state.files.get(state.sourceId);
     const safe = (fn) => { try { return fn(); } catch (_) { return undefined; } };
@@ -748,7 +1921,7 @@
     out.setModificationDate(new Date());
     out.setCreator('PDF samenvoegen');
     const removed = stripActiveContent(out);
-    return { bytes: await out.save(), removed };
+    return { bytes: await out.save(), removed, formIssues };
   }
 
   function downloadBytes(bytes, filename) {
@@ -794,7 +1967,7 @@
       }
       setBusy(true, 'PDF wordt samengevoegd…');
       // Eerst het hele bestand maken; pas daarna schrijven, zodat het origineel bij een fout heel blijft.
-      const { bytes, removed } = await buildPdf(name);
+      const { bytes, removed, formIssues } = await buildPdf(name);
       if (target) {
         const w = await target.createWritable();
         try {
@@ -817,6 +1990,7 @@
         toast(`“${filename}” is gedownload`);
       }
       if (removed) toast(`Uit veiligheid ${removed === 1 ? 'is 1 script of actief onderdeel' : `zijn ${removed} scripts of actieve onderdelen`} uit het resultaat gehaald.`);
+      if (formIssues.length) toast(`Deze formuliervelden konden niet worden ingevuld: ${formIssues.join(', ')}. Controleer het resultaat.`, 'error');
       state.dirty = false;
       updateToolbar();
     } catch (err) {
@@ -1005,14 +2179,28 @@
     const inField = ev.target instanceof HTMLElement && (ev.target.matches('input, textarea, select') || ev.target.isContentEditable);
     const hasDoc = state.entries.length > 0;
 
+    if (els.sigDialog.open || els.pinDialog.open) return;   // de dialogen regelen hun eigen toetsen
+    if (key === 'Escape' && !els.sigMenu.hidden) { closeSigMenu(); els.btnSign.focus(); return; }
     if (mod && !ev.altKey && key.toLowerCase() === 'o') { ev.preventDefault(); openPicker(); return; }
     if (!hasDoc) return;
     if (mod && !ev.altKey && key.toLowerCase() === 's') { ev.preventDefault(); save(ev.shiftKey); return; }
     if (inField) {
-      if (key === 'Enter' || key === 'Escape') { ev.target.blur(); }
+      // Enter sluit alleen een gewoon tekstveld af; in tekstvakken en meerregelige velden is het een nieuwe regel.
+      const singleLine = ev.target.matches('input:not([type=checkbox]):not([type=radio])');
+      if (key === 'Escape' || (key === 'Enter' && singleLine)) ev.target.blur();
       return;
     }
     if (els.busy.classList.contains('show')) return;
+
+    if (state.activeAnno && !mod) {
+      const { e, it } = state.activeAnno;
+      if (key === 'Delete' || key === 'Backspace') { ev.preventDefault(); removeAnno(e, it); return; }
+      if (key === 'Escape') { setActiveAnno(null, null); return; }
+      if (key === 'Enter' && it.type === 'text') { ev.preventDefault(); startEditing(e, it, false); return; }
+      const step = ev.shiftKey ? 10 : 1;
+      const nudge = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[key];
+      if (nudge) { ev.preventDefault(); nudgeAnno(e, it, nudge[0], nudge[1]); return; }
+    }
 
     if (mod && key.toLowerCase() === 'z') { ev.preventDefault(); ev.shiftKey ? redo() : undo(); return; }
     if (mod && key.toLowerCase() === 'y') { ev.preventDefault(); redo(); return; }

@@ -168,6 +168,119 @@ a.btn-big{text-decoration:none}
 }
 .page-indicator.show{opacity:1}
 
+/* ---------- Handtekeningen, tekstvakken en formuliervelden ---------- */
+/* De pagina is een "container": 100cqw is de paginabreedte. --pt (px per PDF-punt) wordt per laag gezet. */
+.page,.thumb-frame{container-type:inline-size}
+.layer{position:absolute;inset:0;z-index:2;pointer-events:none}
+.anno{position:absolute;pointer-events:auto;cursor:move;touch-action:none;border-radius:2px}
+.thumb .anno{pointer-events:none}
+.anno-inner{position:absolute;left:50%;top:50%;transform-origin:50% 50%;display:block}
+img.anno-inner{max-width:none;user-select:none;-webkit-user-drag:none}
+.anno-text .anno-inner{
+  width:max-content;white-space:pre;font-family:Helvetica,Arial,"Liberation Sans",sans-serif;
+  line-height:1.2;min-width:.4em;outline:none;
+}
+.viewer .anno:hover{outline:1px dashed color-mix(in srgb,var(--accent) 60%,transparent);outline-offset:2px}
+.viewer .anno.active{outline:1.5px solid var(--accent);outline-offset:2px}
+.anno.editing{cursor:text;background:rgba(255,248,196,.55)}
+.anno.editing .anno-inner{cursor:text}
+.anno-inner.empty::before{content:attr(data-placeholder);color:#8a8a8a}
+.anno-tools{
+  position:absolute;bottom:calc(100% + 8px);right:-4px;display:none;gap:2px;padding:3px;border-radius:9px;
+  background:rgba(28,28,30,.94);box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:3;cursor:default;
+}
+.viewer .anno.active .anno-tools{display:flex}
+.anno-tool{
+  min-width:28px;height:26px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:#fff;
+  font-size:13px;font-weight:600;cursor:pointer;line-height:26px;
+}
+.anno-tool:hover{background:rgba(255,255,255,.16)}
+.anno-tool.swatch-blue{color:#7fa6ff}
+.anno-handle{
+  position:absolute;right:-7px;bottom:-7px;width:14px;height:14px;border-radius:50%;display:none;
+  background:var(--accent);border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.3);cursor:nwse-resize;
+}
+.viewer .anno.active .anno-handle{display:block}
+
+.field{position:absolute;pointer-events:auto}
+.field-ctl{
+  position:absolute;left:50%;top:50%;margin:0;box-sizing:border-box;border:1px solid transparent;border-radius:2px;
+  background:rgba(10,100,214,.09);color:#000;font-family:Helvetica,Arial,"Liberation Sans",sans-serif;
+  padding:0 2px;line-height:1.15;resize:none;color-scheme:light;
+}
+.field-ctl:hover{border-color:rgba(10,100,214,.45)}
+.field-ctl:focus{outline:none;border-color:#0a64d6;background:rgba(10,100,214,.05);box-shadow:0 0 0 2px rgba(10,100,214,.25)}
+.field-ctl:disabled{background:transparent;border-color:transparent}
+input.field-ctl[type=checkbox],input.field-ctl[type=radio]{padding:0;accent-color:#0a64d6;background:transparent}
+select.field-ctl{padding:0}
+
+/* Menu onder "Onderteken" */
+.menu{
+  position:fixed;z-index:25;min-width:250px;max-width:min(330px,calc(100vw - 16px));padding:6px;border-radius:12px;
+  background:var(--surface);border:1px solid var(--border);box-shadow:0 12px 36px rgba(0,0,0,.22);
+}
+.menu-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:6px 8px 4px}
+.sig-list{display:grid;gap:4px;padding:2px 0 4px}
+.sig-item{display:flex;align-items:center;gap:4px}
+.sig-use{
+  flex:1;height:58px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;padding:4px 8px;
+  display:flex;align-items:center;justify-content:center;
+}
+.sig-use:hover{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.sig-use img{max-height:48px;max-width:100%}
+.sig-del{width:30px;height:30px;border:0;border-radius:7px;background:transparent;color:var(--muted);cursor:pointer;font-size:16px}
+.sig-del:hover{background:var(--hover);color:var(--danger)}
+.menu-empty{margin:2px 8px 6px;color:var(--muted)}
+.menu-item{display:block;width:100%;text-align:left;border:0;background:transparent;padding:8px 10px;border-radius:7px;cursor:pointer}
+.menu-item:hover,.menu-item:focus-visible{background:var(--accent-soft)}
+.menu-sep{height:1px;background:var(--border);margin:4px 2px}
+.menu-note{margin:4px 8px 2px;font-size:11.5px;color:var(--muted)}
+
+/* Dialoog "Nieuwe handtekening" */
+.dialog{
+  width:min(600px,calc(100vw - 32px));border:0;border-radius:16px;padding:20px 22px 18px;
+  background:var(--surface);color:var(--text);box-shadow:0 24px 70px rgba(0,0,0,.35);
+}
+.dialog::backdrop{background:rgba(0,0,0,.35)}
+.dialog h2{margin:0 0 12px;font-size:17px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:14px}
+.tab{border:0;background:transparent;padding:8px 12px;border-bottom:2px solid transparent;margin-bottom:-1px;cursor:pointer;color:var(--muted);font-weight:600}
+.tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.sig-pad{display:block;width:100%;height:190px;background:#fff;border:1px solid var(--border);border-radius:10px;touch-action:none;cursor:crosshair}
+.pad-row{display:flex;align-items:center;gap:12px;margin-top:8px}
+.pad-row .hint{flex:1}
+.hint{color:var(--muted);font-size:12.5px;margin:0 0 10px}
+.pad-row .hint{margin:0}
+.ink-choice{display:flex;gap:6px}
+.ink{width:22px;height:22px;border-radius:50%;border:2px solid var(--surface);box-shadow:0 0 0 1px var(--border);cursor:pointer;padding:0}
+.ink-black{background:#111}
+.ink-blue{background:#1a3fa6}
+.ink[aria-checked="true"]{box-shadow:0 0 0 2px var(--accent)}
+.link-btn{border:0;background:transparent;color:var(--accent);font-weight:600;cursor:pointer;padding:4px 6px}
+.field-label{display:block;font-weight:600;margin-bottom:6px}
+.text-input{width:100%;height:36px;padding:0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font:inherit;font-size:14px}
+.text-input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.handwriting{font-family:"Segoe Script","Brush Script MT","Lucida Handwriting","Snell Roundhand","Apple Chancery",cursive}
+.type-preview{
+  margin-top:12px;height:110px;border:1px solid var(--border);border-radius:10px;background:#fff;color:#111;
+  display:flex;align-items:center;justify-content:center;font-size:40px;overflow:hidden;white-space:nowrap;padding:0 12px;
+}
+.image-preview{margin-top:12px;min-height:110px;border:1px dashed var(--border);border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;padding:8px}
+.image-preview img{max-width:100%;max-height:150px}
+.check{display:flex;align-items:center;gap:8px;margin-top:16px;font-weight:500}
+.check input{width:16px;height:16px;accent-color:var(--accent)}
+.note{color:var(--muted);font-size:12px;margin:8px 0 0}
+.dialog-error{color:var(--danger);font-weight:600;margin:10px 0 0}
+.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.dialog-small{width:min(400px,calc(100vw - 32px))}
+.pin-row .check{margin-top:8px}
+.pin-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.pin-fields .hint{grid-column:1 / -1;margin:0}
+.sig-locked{flex-direction:column;gap:2px;color:var(--text);font-weight:600}
+.sig-locked small{font-weight:400;color:var(--muted)}
+.sig-locked svg{width:18px;height:18px}
+.tb-btn.busy{opacity:.6;pointer-events:none}
+
 /* Drop overlay */
 .drop-overlay{
   position:fixed; inset:0; z-index:20; display:none; align-items:center; justify-content:center; pointer-events:none;

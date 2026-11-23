@@ -30,7 +30,7 @@
     sigRemember: $('sigRemember'), sigError: $('sigError'), btnSigCancel: $('btnSigCancel'), btnSigUse: $('btnSigUse'),
     pinRow: $('pinRow'), pinFields: $('pinFields'), sigUsePin: $('sigUsePin'), sigPin: $('sigPin'), sigPin2: $('sigPin2'),
     pinDialog: $('pinDialog'), pinInput: $('pinInput'), pinError: $('pinError'), btnPinOk: $('btnPinOk'), btnPinCancel: $('btnPinCancel'),
-    btnLockSigs: $('btnLockSigs'),
+    btnLockSigs: $('btnLockSigs'), btnReturn: $('btnReturn'),
   };
 
   // Beveiliging: niet werken binnen een frame van een andere website (tegen clickjacking).
@@ -75,6 +75,8 @@
     activeAnno: null,     // { e, it }: geselecteerde handtekening of tekstvak
   };
   let nextFileId = 1, nextEntryId = 1, nextAnnoId = 1;
+  // Koppeling met een andere tool op dit websiteadres (zie onderaan).
+  const link = { active: false, wacht: 0, origin: location.origin, sessie: null, label: '', busy: false };
   const byEl = new WeakMap();
   const byId = new Map();
 
@@ -1476,6 +1478,7 @@
     els.btnSave.disabled = n === 0;
     const name = sanitizeName(els.fileName.value) || 'Samengevoegd';
     document.title = n ? `${state.dirty ? '• ' : ''}${name}.pdf – PDF samenvoegen` : 'PDF samenvoegen';
+    updateLinkUi();
   }
 
   function renderLegend() {
@@ -2243,5 +2246,91 @@
     if (state.dirty && state.entries.length) { ev.preventDefault(); ev.returnValue = ''; }
   });
 
+  /* ---------------- Koppeling met een andere tool op dit websiteadres ----------------
+     Een tool op hetzelfde adres (bijvoorbeeld de Informatiemanagement-tool) opent deze pagina met
+     #koppeling in een nieuw tabblad en stuurt er PDF's naartoe. "Terugzetten" stuurt het resultaat
+     terug. Alleen het venster dat dit tabblad opende én van precies dit websiteadres komt, wordt
+     vertrouwd; berichten van andere sites of vensters worden genegeerd. */
+  const MAX_LINK_FILES = 50;
+
+  function linkOpener() {
+    try { return window.opener && !window.opener.closed ? window.opener : null; } catch (_) { return null; }
+  }
+
+  function updateLinkUi() {
+    els.btnReturn.hidden = !link.active;
+    els.btnSave.classList.toggle('primary', !link.active);
+    els.btnReturn.disabled = !link.active || state.entries.length === 0 || link.busy;
+    els.btnReturn.title = link.active ? `Zet het resultaat terug bij ${link.label} (als nieuwe bijlage)` : '';
+  }
+
+  async function returnResult() {
+    if (!link.active || link.busy || !state.entries.length) return;
+    const opener = linkOpener();
+    if (!opener) { toast('Het venster waaruit je deze PDF opende is gesloten. Bewaar het resultaat met Bewaar.', 'error'); return; }
+    const name = sanitizeName(els.fileName.value) || 'Samengevoegd';
+    els.fileName.value = name;
+    link.busy = true; updateLinkUi();
+    setBusy(true, 'PDF wordt gemaakt…');
+    try {
+      const { bytes, removed, formIssues } = await buildPdf(name);
+      const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      opener.postMessage({ type: 'pdftool:resultaat', versie: 1, sessie: link.sessie, naam: name + '.pdf', bytes: buf }, link.origin, [buf]);
+      if (removed) toast(`Uit veiligheid ${removed === 1 ? 'is 1 script of actief onderdeel' : `zijn ${removed} scripts of actieve onderdelen`} uit het resultaat gehaald.`);
+      if (formIssues.length) toast(`Deze formuliervelden konden niet worden ingevuld: ${formIssues.join(', ')}. Controleer het resultaat.`, 'error');
+      // Wacht op de bevestiging; komt die niet, dan blijft "nog niet bewaard" staan.
+      link.wacht = setTimeout(() => {
+        link.busy = false; updateLinkUi();
+        toast('Geen bevestiging ontvangen. Controleer of de bijlage is toegevoegd, of bewaar het resultaat met Bewaar.', 'error');
+      }, 15000);
+    } catch (err) {
+      console.error(err);
+      link.busy = false; updateLinkUi();
+      toast('Terugzetten is mislukt: ' + ((err && err.message) || err), 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function onLinkMessage(ev) {
+    const opener = linkOpener();
+    if (!opener || ev.source !== opener || ev.origin !== link.origin) return;
+    const d = ev.data;
+    if (!d || typeof d !== 'object' || d.versie !== 1) return;
+    if (d.type === 'im:open') {
+      if (typeof d.sessie !== 'string' || d.sessie.length > 100 || !Array.isArray(d.bestanden) || d.bestanden.length > MAX_LINK_FILES) return;
+      if (state.dirty && state.entries.length && !confirm('Er staat nog een document open dat niet is bewaard. Vervangen door de nieuwe PDF?')) return;
+      const files = [];
+      for (const b of d.bestanden) {
+        if (!b || !(b.bytes instanceof ArrayBuffer) || typeof b.naam !== 'string') continue;
+        files.push(new File([b.bytes], b.naam.slice(0, 200) || 'Document.pdf', { type: 'application/pdf' }));
+      }
+      closeDocument(true);
+      link.active = true;
+      link.sessie = d.sessie;
+      link.label = typeof d.label === 'string' && d.label.trim() ? `“${d.label.trim().slice(0, 120)}”` : 'de tool waaruit je dit opende';
+      updateLinkUi();
+      if (files.length) addFiles(files);
+      toast(`Geopend vanuit ${link.label}. Klaar? Klik op Terugzetten.`);
+    } else if (d.type === 'im:ontvangen' && link.active && d.sessie === link.sessie) {
+      clearTimeout(link.wacht);
+      link.busy = false;
+      if (d.ok) {
+        state.dirty = false;
+        updateToolbar();
+        toast(`Bijlage “${String(d.bestandsnaam || '').slice(0, 200)}” toegevoegd bij ${link.label}`);
+      } else {
+        updateLinkUi();
+        toast('Toevoegen als bijlage is mislukt: ' + String(d.fout || 'onbekende fout').slice(0, 300), 'error');
+      }
+    }
+  }
+
+  els.btnReturn.addEventListener('click', returnResult);
+  if (location.hash === '#koppeling' && linkOpener()) {
+    window.addEventListener('message', onLinkMessage);
+    // Laat alleen een venster op precies dit websiteadres weten dat de tool klaar is.
+    try { linkOpener().postMessage({ type: 'pdftool:klaar', versie: 1 }, link.origin); } catch (_) { /* negeer */ }
+  }
   updateToolbar();
 })();
